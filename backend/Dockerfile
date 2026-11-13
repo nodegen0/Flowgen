@@ -4,7 +4,7 @@ FROM python:3.10-slim
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=7860 \
+    PORT=8000 \
     UPLOAD_DIR=/app/uploads
 
 # Install system dependencies
@@ -36,14 +36,14 @@ RUN mkdir -p /app/uploads && \
     chown -R user:user /app && \
     chmod -R 777 /app/uploads
 
-# Expose backend API port (7860 default for Hugging Face Spaces, overridable by $PORT)
-EXPOSE 7860
+# Expose backend API port (8000 default, dynamically overridable by $PORT e.g. on Render)
+EXPOSE 8000
 
 USER user
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-7860}/api/health || exit 1
+    CMD curl -f http://localhost:${PORT:-8000}/api/health || exit 1
 
 # Start FastAPI with Uvicorn
-CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-7860}"]
+CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8000}"]
