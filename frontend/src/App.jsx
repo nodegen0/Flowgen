@@ -106,6 +106,11 @@ export default function App() {
 
   // Handle file upload
   async function handleFile(file) {
+    if (file.size > 200 * 1024 * 1024) {
+      setErrorMessage(`File exceeds the maximum upload limit of 200MB (${(file.size / (1024 * 1024)).toFixed(1)}MB).`);
+      setStatus('error');
+      return;
+    }
     setStatus('loading');
     setLoadingLabel(`Analyzing ${file.name}…`);
     try {

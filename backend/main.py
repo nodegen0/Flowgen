@@ -25,17 +25,28 @@ def _new_parser(language):
     return parser
 
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads"))
 
 # ─────────────────────────────────────────────
 # File helpers (unchanged)
 # ─────────────────────────────────────────────
 
+MAX_UPLOAD_SIZE = 200 * 1024 * 1024  # 200 MB
+
+
 def save_file(file):
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     filepath = os.path.join(UPLOAD_DIR, file.filename)
+    bytes_written = 0
     with open(filepath, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        while chunk := file.file.read(1024 * 1024):
+            bytes_written += len(chunk)
+            if bytes_written > MAX_UPLOAD_SIZE:
+                buffer.close()
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                raise ValueError("File exceeds maximum allowed limit of 200MB.")
+            buffer.write(chunk)
     return filepath
 
 def extract_project(zip_path):

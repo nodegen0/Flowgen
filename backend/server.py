@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import uuid
 import sys
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -86,6 +87,60 @@ async def get_optional_user(request: Request) -> dict | None:
         return await users_col.find_one({"_id": ObjectId(user_id)})
     except Exception:
         return None
+
+
+# ── Storage Quota Management (200MB per user / upload) ───────────
+MAX_USER_STORAGE_BYTES = 200 * 1024 * 1024  # 200 MB = 209,715,200 bytes
+
+
+def get_dir_size(path: str) -> int:
+    """Calculate the total size in bytes of a directory tree or file."""
+    if not os.path.exists(path):
+        return 0
+    if os.path.isfile(path):
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+    total = 0
+    try:
+        for root, _, files in os.walk(path):
+            for f in files:
+                fp = os.path.join(root, f)
+                try:
+                    if not os.path.islink(fp):
+                        total += os.path.getsize(fp)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total
+
+
+async def calculate_user_storage(user_id: str | None) -> int:
+    """Calculate the total bytes consumed by all projects belonging to a user on disk."""
+    if not user_id:
+        return 0
+    total = 0
+    try:
+        cursor = projects_col.find({"user_id": user_id})
+        async for project in cursor:
+            # Check zip file
+            zip_path = project.get("zip_path")
+            if zip_path and os.path.exists(zip_path):
+                try:
+                    total += os.path.getsize(zip_path)
+                except OSError:
+                    pass
+            # Check extracted / cloned project folder
+            pname = project.get("name")
+            if pname:
+                folder_path = os.path.join(UPLOAD_DIR, pname)
+                if os.path.exists(folder_path):
+                    total += get_dir_size(folder_path)
+    except Exception as e:
+        print(f"Error calculating user storage: {e}")
+    return total
 
 
 class GitRequest(BaseModel):
@@ -213,7 +268,7 @@ async def get_project_analysis(project_id: str):
 
 @app.delete("/api/projects/{project_id}")
 async def delete_project_endpoint(project_id: str, request: Request):
-    """Delete a project and its associated analyses."""
+    """Delete a project, its associated analyses, and clean up disk storage to free quota."""
     user = await get_optional_user(request)
     try:
         project = await projects_col.find_one({"_id": ObjectId(project_id)})
@@ -222,6 +277,23 @@ async def delete_project_endpoint(project_id: str, request: Request):
 
         if project.get("user_id") and user and project.get("user_id") != str(user["_id"]):
             raise HTTPException(status_code=403, detail="Not authorized to delete this project")
+
+        # Clean up files on disk to free up user's 200MB quota
+        zip_path = project.get("zip_path")
+        if zip_path and os.path.exists(zip_path):
+            try:
+                os.remove(zip_path)
+            except OSError:
+                pass
+
+        pname = project.get("name")
+        if pname:
+            folder_path = os.path.join(UPLOAD_DIR, pname)
+            if os.path.exists(folder_path):
+                try:
+                    shutil.rmtree(folder_path, ignore_errors=True)
+                except OSError:
+                    pass
 
         await projects_col.delete_one({"_id": ObjectId(project_id)})
         await analyses_col.delete_many({"project_id": project_id})
@@ -232,21 +304,94 @@ async def delete_project_endpoint(project_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/user/storage")
+async def get_user_storage(request: Request):
+    """Return storage statistics for the user (maximum 200MB quota)."""
+    user = await get_optional_user(request)
+    user_id = str(user["_id"]) if user else None
+    used_bytes = await calculate_user_storage(user_id) if user_id else 0
+    return {
+        "max_bytes": MAX_USER_STORAGE_BYTES,
+        "max_mb": 200,
+        "used_bytes": used_bytes,
+        "used_mb": round(used_bytes / (1024 * 1024), 2),
+        "remaining_bytes": max(0, MAX_USER_STORAGE_BYTES - used_bytes),
+        "remaining_mb": round(max(0, MAX_USER_STORAGE_BYTES - used_bytes) / (1024 * 1024), 2),
+    }
+
+
 @app.post("/api/upload-zip")
 async def upload_zip(request: Request, file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".zip"):
+    if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(status_code=400, detail="Please upload a .zip file")
 
     user = await get_optional_user(request)
+    user_id = str(user["_id"]) if user else None
+
+    # Check user current storage usage against 200MB limit
+    current_storage = await calculate_user_storage(user_id) if user_id else 0
+    if current_storage >= MAX_USER_STORAGE_BYTES:
+        used_mb = current_storage / (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"Storage quota reached: You have used {used_mb:.1f} MB of your 200 MB limit. Please delete existing projects to free up space."
+        )
 
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     filepath = os.path.join(UPLOAD_DIR, file.filename)
-    with open(filepath, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+
+    # Stream file to disk while enforcing max 200MB upload limit and user quota
+    bytes_written = 0
+    try:
+        with open(filepath, "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):  # 1MB chunk
+                bytes_written += len(chunk)
+                if bytes_written > MAX_USER_STORAGE_BYTES:
+                    buffer.close()
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                    raise HTTPException(
+                        status_code=413,
+                        detail="File exceeds the maximum upload limit of 200 MB."
+                    )
+                if user_id and (current_storage + bytes_written > MAX_USER_STORAGE_BYTES):
+                    buffer.close()
+                    if os.path.exists(filepath):
+                        os.remove(filepath)
+                    used_mb = current_storage / (1024 * 1024)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Storage quota exceeded: Uploading this file exceeds your 200 MB limit (currently using {used_mb:.1f} MB). Please delete older projects to free up space."
+                    )
+                buffer.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        raise HTTPException(status_code=500, detail=f"Failed to save upload: {e}")
+
+    # Inspect zip to guard against zip bombs
+    try:
+        with zipfile.ZipFile(filepath, "r") as zf:
+            total_uncompressed = sum(info.file_size for info in zf.infolist())
+            if total_uncompressed > MAX_USER_STORAGE_BYTES * 3:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Extracted codebase ({round(total_uncompressed / (1024*1024), 1)} MB) exceeds allowed limit."
+                )
+    except zipfile.BadZipFile:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        raise HTTPException(status_code=400, detail="Corrupted or invalid zip file.")
 
     try:
         project_path = extract_project(filepath)
     except Exception as e:
+        if os.path.exists(filepath):
+            os.remove(filepath)
         raise HTTPException(status_code=400, detail=f"Could not extract zip: {e}")
 
     try:
@@ -288,6 +433,16 @@ async def upload_zip(request: Request, file: UploadFile = File(...)):
 @app.post("/api/analyze-git")
 async def analyze_git(request: Request, req: GitRequest):
     user = await get_optional_user(request)
+    user_id = str(user["_id"]) if user else None
+
+    # Check user storage quota
+    current_storage = await calculate_user_storage(user_id) if user_id else 0
+    if current_storage >= MAX_USER_STORAGE_BYTES:
+        used_mb = current_storage / (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"Storage quota reached: You have used {used_mb:.1f} MB of your 200 MB limit. Please delete existing projects to free up space."
+        )
 
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     repo_name = req.url.rstrip("/").split("/")[-1].replace(".git", "") or "repo"
@@ -307,9 +462,21 @@ async def analyze_git(request: Request, req: GitRequest):
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=408, detail="git clone timed out")
 
+    # Enforce 200MB limit on cloned repo
+    cloned_size = get_dir_size(dest)
+    if cloned_size > MAX_USER_STORAGE_BYTES or (user_id and (current_storage + cloned_size > MAX_USER_STORAGE_BYTES)):
+        shutil.rmtree(dest, ignore_errors=True)
+        used_mb = current_storage / (1024 * 1024)
+        repo_mb = cloned_size / (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"Repository size ({repo_mb:.1f} MB) exceeds your 200 MB storage quota (currently using {used_mb:.1f} MB)."
+        )
+
     try:
         result = run_full_analysis(dest)
     except Exception as e:
+        shutil.rmtree(dest, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Analysis failed: {e}")
 
     result["project_name"] = repo_name

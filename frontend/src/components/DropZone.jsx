@@ -60,7 +60,7 @@ export default function DropZone({ status, loadingLabel, errorMessage, onFile, o
             <p className="drop-text">
               Drag & drop your <strong style={{ color: 'var(--accent)' }}>.zip</strong> or a git URL
             </p>
-            <p className="drop-sub">Supports Python · C · C++ · JavaScript projects</p>
+            <p className="drop-sub">Supports Python · C · C++ · JavaScript projects (Max 200MB)</p>
           </>
         )}
 

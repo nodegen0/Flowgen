@@ -4,7 +4,8 @@ FROM python:3.10-slim
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=8000
+    PORT=7860 \
+    UPLOAD_DIR=/app/uploads
 
 # Install system dependencies
 # gcc and g++ are required to compile tree-sitter parsers
@@ -17,6 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Set up user for Hugging Face Spaces compatibility (uid 1000)
+RUN useradd -m -u 1000 user
+
 WORKDIR /app
 
 # Copy dependency definition and install packages
@@ -27,15 +31,19 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy backend source code
 COPY . .
 
-# Ensure uploads directory exists
-RUN mkdir -p /app/uploads
+# Ensure uploads directory exists and configure permissions
+RUN mkdir -p /app/uploads && \
+    chown -R user:user /app && \
+    chmod -R 777 /app/uploads
 
-# Expose backend API port
-EXPOSE 8000
+# Expose backend API port (7860 default for Hugging Face Spaces, overridable by $PORT)
+EXPOSE 7860
+
+USER user
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+    CMD curl -f http://localhost:${PORT:-7860}/api/health || exit 1
 
 # Start FastAPI with Uvicorn
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-7860}"]
