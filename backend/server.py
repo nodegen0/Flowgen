@@ -71,6 +71,16 @@ app.include_router(chat.router)
 app.include_router(bookings.router)
 
 
+@app.get("/")
+def root():
+    return {
+        "service": "FlowGen Analysis API",
+        "status": "online",
+        "health": "/api/health",
+        "docs": "/docs",
+    }
+
+
 async def get_optional_user(request: Request) -> dict | None:
     """Helper to extract the current user if an Authorization Bearer token is provided."""
     auth_header = request.headers.get("Authorization")
