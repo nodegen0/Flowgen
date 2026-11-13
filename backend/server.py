@@ -181,12 +181,13 @@ def run_full_analysis(project_path: str) -> dict:
 @app.get("/api/health")
 async def health():
     """Health check endpoint that also verifies MongoDB connectivity."""
-    db_connected = await ping_database()
+    db_connected, db_error = await ping_database()
     return {
         "status": "ok",
         "mongodb": {
             "connected": db_connected,
-            "database": mongo_db.name if db_connected else None
+            "database": mongo_db.name if db_connected else None,
+            "error": db_error if not db_connected else None,
         }
     }
 

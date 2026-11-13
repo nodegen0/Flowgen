@@ -20,14 +20,15 @@ annotations_col = db["annotations"]
 bookings_col    = db["bookings"]
 
 
-async def ping_database() -> bool:
+async def ping_database() -> tuple[bool, str | None]:
     """Verify that MongoDB connection is active and healthy."""
     try:
         await client.admin.command("ping")
-        return True
+        return True, None
     except Exception as e:
-        print(f"MongoDB connection error: {e}")
-        return False
+        err = str(e)
+        print(f"MongoDB connection error: {err}")
+        return False, err
 
 
 def get_db():
